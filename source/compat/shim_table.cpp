@@ -367,6 +367,119 @@ static int pt_mattr_init(void* a)       { if (a) memset(a, 0, 4); return 0; }
 static int pt_mattr_destroy(void*)      { return 0; }
 static int pt_mattr_settype(void*, int) { return 0; }
 
+// ─── prctl (Linux process/thread control — crash reporters use PR_SET_NAME) ───
+static int stub_prctl(int, unsigned long, unsigned long, unsigned long, unsigned long) {
+    return 0;
+}
+
+// ─── gettid (Linux syscall — thread ID, not in newlib) ──────────────────────
+static pid_t stub_gettid(void) { return 1; }
+
+// ─── getpid / getuid / getgid ────────────────────────────────────────────────
+// newlib has getpid() but shimming it makes it available to the game's .so
+static pid_t stub_getpid(void)  { return 1; }
+static uid_t stub_getuid(void)  { return 0; }
+static gid_t stub_getgid(void)  { return 0; }
+
+// ─── Signal stubs (crash reporters install SIGSEGV/SIGBUS handlers) ─────────
+// Return success without actually doing anything — Switch uses its own fault handler
+struct BnxSigaction { void* handler; unsigned long flags; void* restorer; uint64_t mask; };
+static int stub_sigaction(int, const BnxSigaction*, BnxSigaction*) { return 0; }
+static int stub_sigemptyset(uint64_t* s) { if (s) *s = 0; return 0; }
+static int stub_sigfillset(uint64_t* s)  { if (s) *s = ~(uint64_t)0; return 0; }
+static int stub_sigaddset(uint64_t* s, int sig) {
+    if (s && sig > 0 && sig < 64) *s |= (1ULL << (sig - 1));
+    return 0;
+}
+static int stub_sigdelset(uint64_t* s, int sig) {
+    if (s && sig > 0 && sig < 64) *s &= ~(1ULL << (sig - 1));
+    return 0;
+}
+static int stub_sigismember(const uint64_t* s, int sig) {
+    if (!s || sig <= 0 || sig >= 64) return 0;
+    return (*s >> (sig - 1)) & 1;
+}
+static int stub_kill(pid_t, int)    { return 0; }
+static int stub_raise(int)          { return 0; }  // prevent crash reporter self-test
+static int stub_pthread_kill(void*, int) { return 0; }
+static int stub_sigprocmask(int, const uint64_t*, uint64_t*) { return 0; }
+static int stub_pthread_sigmask(int, const uint64_t*, uint64_t*) { return 0; }
+
+// ─── mprotect stub (crash reporters may set guard-page permissions) ──────────
+static int stub_mprotect(void*, size_t, int) { return 0; }
+
+// ─── pipe / dup / dup2 (crash reporter IPC) ─────────────────────────────────
+static int stub_pipe(int fd[2])          { (void)fd; errno = ENOTSUP; return -1; }
+static int stub_dup(int)                 { errno = ENOTSUP; return -1; }
+static int stub_dup2(int, int)           { errno = ENOTSUP; return -1; }
+
+// ─── ioctl stub ──────────────────────────────────────────────────────────────
+static int stub_ioctl(int, unsigned long, void*) { errno = ENOTSUP; return -1; }
+
+// ─── access stub (file existence check) ──────────────────────────────────────
+static int stub_access(const char*, int) { errno = ENOENT; return -1; }
+
+// ─── chmod / fchmod / lstat ──────────────────────────────────────────────────
+static int stub_chmod(const char*, mode_t)   { return 0; }
+static int stub_fchmod(int, mode_t)          { return 0; }
+static int stub_lstat(const char* p, struct stat* s) { return stat(p, s); }
+
+// ─── pthread_setname_np / pthread_getname_np (thread naming, GNU ext) ────────
+static int stub_pthread_setname_np(void*, const char*) { return 0; }
+static int stub_pthread_getname_np(void*, char* buf, size_t sz) {
+    if (buf && sz > 0) buf[0] = '\0'; return 0;
+}
+static int stub_pthread_attr_setstack(void*, void*, size_t) { return 0; }
+static int stub_pthread_attr_getstack(const void*, void** s, size_t* z) {
+    if (s) *s = nullptr; if (z) *z = 65536; return 0;
+}
+static int stub_pthread_attr_setschedpolicy(void*, int) { return 0; }
+static int stub_pthread_attr_setschedparam(void*, const void*) { return 0; }
+static int stub_pthread_attr_getschedparam(const void*, void*) { return 0; }
+static int stub_pthread_barrier_init(void*, const void*, unsigned) { return 0; }
+static int stub_pthread_barrier_wait(void*) { return 0; }
+static int stub_pthread_barrier_destroy(void*) { return 0; }
+
+// ─── getauxval (Android uses AT_HWCAP for NEON detection) ───────────────────
+static unsigned long stub_getauxval(unsigned long type) {
+    switch (type) {
+        case 16: return 0x1001;   // AT_HWCAP: NEON (bit 12) + basic ARM64
+        case 26: return 0;        // AT_HWCAP2
+        default: return 0;
+    }
+}
+
+// ─── sleep / usleep (common in init code) ────────────────────────────────────
+static unsigned int stub_sleep(unsigned int sec) {
+    svcSleepThread((uint64_t)sec * 1000000000ULL); return 0;
+}
+static int stub_usleep(unsigned int usec) {
+    svcSleepThread((uint64_t)usec * 1000ULL); return 0;
+}
+
+// ─── clock_nanosleep ──────────────────────────────────────────────────────────
+static int stub_clock_nanosleep(int, int, const struct timespec* req, struct timespec*) {
+    if (req) svcSleepThread(req->tv_sec * 1000000000LL + req->tv_nsec);
+    return 0;
+}
+
+// ─── strtod_l / strtof_l locale variants ────────────────────────────────────
+static double      stub_strtod_l(const char* s, char** e, void*) { return strtod(s, e); }
+static float       stub_strtof_l(const char* s, char** e, void*) { return strtof(s, e); }
+
+// ─── mmap / munmap (crash reporters may use anon mmap for stack unwinding) ───
+// Map via memalign as a best-effort fallback; executable mapping not supported.
+static void* stub_mmap(void*, size_t len, int, int, int, long) {
+    void* p = memalign(0x1000, len);
+    if (!p) { errno = ENOMEM; return (void*)(uintptr_t)-1; }
+    memset(p, 0, len);
+    return p;
+}
+static int stub_munmap(void* p, size_t) { free(p); return 0; }
+
+// ─── __register_atfork (pthread fork support — no-op on Switch) ─────────────
+static int stub_register_atfork(void*, void*, void*, void*) { return 0; }
+
 // ─── wcsnrtombs / mbsnrtowcs (GNU ext — stub in case newlib lacks them) ──────
 static size_t stub_wcsnrtombs(char* d, const wchar_t** src, size_t nwc, size_t len, void*) {
     if (!src || !*src || !len) return 0;
@@ -1067,6 +1180,54 @@ static const ShimEntry g_shims[] = {
     {"sysconf",         (void*)stub_sysconf},
     {"syscall",         (void*)stub_syscall},
     {"dl_iterate_phdr", (void*)stub_dl_iterate_phdr},
+    {"getpid",          (void*)stub_getpid},
+    {"getuid",          (void*)stub_getuid},
+    {"getgid",          (void*)stub_getgid},
+    {"gettid",          (void*)stub_gettid},
+    {"prctl",           (void*)stub_prctl},
+    {"access",          (void*)stub_access},
+    {"chmod",           (void*)stub_chmod},
+    {"fchmod",          (void*)stub_fchmod},
+    {"lstat",           (void*)stub_lstat},
+    {"mprotect",        (void*)stub_mprotect},
+    {"mmap",            (void*)stub_mmap},
+    {"munmap",          (void*)stub_munmap},
+    {"pipe",            (void*)stub_pipe},
+    {"dup",             (void*)stub_dup},
+    {"dup2",            (void*)stub_dup2},
+    {"ioctl",           (void*)stub_ioctl},
+    {"getauxval",       (void*)stub_getauxval},
+    {"sleep",           (void*)stub_sleep},
+    {"usleep",          (void*)stub_usleep},
+    {"clock_nanosleep", (void*)stub_clock_nanosleep},
+    {"strtod_l",        (void*)stub_strtod_l},
+    {"strtof_l",        (void*)stub_strtof_l},
+    {"__register_atfork",(void*)stub_register_atfork},
+
+    // ── signals (crash reporters install SIGSEGV/SIGBUS handlers) ────────────
+    {"sigaction",       (void*)stub_sigaction},
+    {"sigemptyset",     (void*)stub_sigemptyset},
+    {"sigfillset",      (void*)stub_sigfillset},
+    {"sigaddset",       (void*)stub_sigaddset},
+    {"sigdelset",       (void*)stub_sigdelset},
+    {"sigismember",     (void*)stub_sigismember},
+    {"kill",            (void*)stub_kill},
+    {"raise",           (void*)stub_raise},
+    {"pthread_kill",    (void*)stub_pthread_kill},
+    {"sigprocmask",     (void*)stub_sigprocmask},
+    {"pthread_sigmask", (void*)stub_pthread_sigmask},
+
+    // ── pthread extras ───────────────────────────────────────────────────────
+    {"pthread_setname_np",            (void*)stub_pthread_setname_np},
+    {"pthread_getname_np",            (void*)stub_pthread_getname_np},
+    {"pthread_attr_setstack",         (void*)stub_pthread_attr_setstack},
+    {"pthread_attr_getstack",         (void*)stub_pthread_attr_getstack},
+    {"pthread_attr_setschedpolicy",   (void*)stub_pthread_attr_setschedpolicy},
+    {"pthread_attr_setschedparam",    (void*)stub_pthread_attr_setschedparam},
+    {"pthread_attr_getschedparam",    (void*)stub_pthread_attr_getschedparam},
+    {"pthread_barrier_init",          (void*)stub_pthread_barrier_init},
+    {"pthread_barrier_wait",          (void*)stub_pthread_barrier_wait},
+    {"pthread_barrier_destroy",       (void*)stub_pthread_barrier_destroy},
 
     // ── syslog ───────────────────────────────────────────────────────────────
     {"openlog",  (void*)stub_openlog},

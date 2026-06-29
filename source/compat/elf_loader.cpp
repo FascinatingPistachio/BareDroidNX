@@ -13,13 +13,40 @@ extern void compatLogFmt(const char* fmt, ...);
 // External shim table from shim_table.cpp
 void* shimResolve(const char* name);
 
-// Count of unresolved symbols from the most recent elfLoad call
+// Accumulated unresolved symbol count across all elfLoad calls since elfResetCounts()
 static int g_unresolved_count = 0;
 int elfGetUnresolvedCount() { return g_unresolved_count; }
 
-// Result of the most recent svcSetMemoryPermission call (0 = success)
+// First JIT failure code seen since elfResetCounts() (0 = all OK so far)
 static uint32_t g_last_svc_perm_code = 0;
 uint32_t elfGetLastSvcPermCode() { return g_last_svc_perm_code; }
+
+void elfResetCounts() {
+    g_unresolved_count = 0;
+    g_last_svc_perm_code = 0;
+}
+
+// ─── elfRunCtors ──────────────────────────────────────────────────────────────
+// Run DT_INIT_ARRAY constructors stored by elfLoad.  Logs each entry before
+// calling it (and flushes via compatLog) so the crash site is visible in the
+// log when the Switch dies inside a constructor.
+void elfRunCtors(LoadedSo* so) {
+    if (!so || !so->init_arr || so->init_arr_count == 0) return;
+    size_t sl = so->path.rfind('/');
+    const char* soname = (sl != std::string::npos)
+                         ? so->path.c_str() + sl + 1 : so->path.c_str();
+    compatLogFmt("ELF: %s: running %zu constructors", soname, so->init_arr_count);
+    for (size_t k = 0; k < so->init_arr_count; k++) {
+        LoadedSo::InitFn fn = so->init_arr[k];
+        if (fn && fn != (LoadedSo::InitFn)(uintptr_t)-1) {
+            // compatLog flushes after every write — crash site will show here
+            compatLogFmt("ELF: ctor[%zu/%zu] @%p", k + 1, so->init_arr_count, (void*)fn);
+            fn();
+            compatLogFmt("ELF: ctor[%zu/%zu] OK", k + 1, so->init_arr_count);
+        }
+    }
+    compatLogFmt("ELF: %s: all constructors done", soname);
+}
 
 // All successfully loaded .so files (for cross-library symbol resolution)
 static std::vector<LoadedSo*> g_loaded_sos;
@@ -112,9 +139,9 @@ static void applyRela(LoadedSo* so, const Elf64_Rela* relas, size_t count,
 }
 
 // ─── elfLoad ──────────────────────────────────────────────────────────────────
+// Does NOT reset g_unresolved_count or g_last_svc_perm_code — caller must call
+// elfResetCounts() before loading a batch so counts accumulate correctly.
 LoadedSo* elfLoad(const char* path) {
-    g_unresolved_count = 0;
-    g_last_svc_perm_code = 0;
     compatLogFmt("ELF: loading %s", path);
 
     // Read the entire file
@@ -293,33 +320,34 @@ LoadedSo* elfLoad(const char* path) {
     }
 
     // ── Transition to executable ─────────────────────────────────────────────
+    uint32_t this_svc_perm_code = 0;
     if (using_jit) {
         Result exec_rc = jitTransitionToExecutable(&jit_mem);
         so->jit_mem = jit_mem;
-        g_last_svc_perm_code = (uint32_t)exec_rc;
+        this_svc_perm_code = (uint32_t)exec_rc;
         if (R_FAILED(exec_rc)) {
             compatLogFmt("JIT: jitTransitionToExecutable failed: 0x%08X", exec_rc);
         } else {
             compatLog("JIT: code memory is now executable");
         }
     } else {
-        g_last_svc_perm_code = 0xD801;  // heap fallback — report blocker code
+        this_svc_perm_code = 0xD801;  // heap fallback — not executable
     }
+    // Accumulate into global (capture first failure, 0 = all OK so far)
+    if (g_last_svc_perm_code == 0 && this_svc_perm_code != 0)
+        g_last_svc_perm_code = this_svc_perm_code;
 
     // Flush CPU instruction cache over exec region
     __builtin___clear_cache((char*)exec_alloc, (char*)exec_alloc + alloc_size);
 
-    // ── Run DT_INIT_ARRAY constructors ───────────────────────────────────────
-    // Only run if code is actually executable (JIT succeeded).
-    if (init_arr_vaddr && init_arr_sz && using_jit && g_last_svc_perm_code == 0) {
-        typedef void(*InitFn)();
-        InitFn* arr = (InitFn*)(exec_base + init_arr_vaddr);
-        size_t count = init_arr_sz / sizeof(InitFn);
-        compatLogFmt("ELF: running %zu DT_INIT_ARRAY constructors", count);
-        for (size_t k = 0; k < count; k++) {
-            if (arr[k] && arr[k] != (InitFn)(uintptr_t)-1)
-                arr[k]();
-        }
+    // ── Store DT_INIT_ARRAY for deferred constructor run ────────────────────
+    // Constructors are run AFTER all SOs in the batch are loaded (via elfRunCtors),
+    // so cross-library symbols are available.  Only store if JIT succeeded.
+    if (init_arr_vaddr && init_arr_sz && using_jit && this_svc_perm_code == 0) {
+        so->init_arr       = (LoadedSo::InitFn*)(exec_base + init_arr_vaddr);
+        so->init_arr_count = init_arr_sz / sizeof(LoadedSo::InitFn);
+        compatLogFmt("ELF: %zu constructors deferred (run after all SOs loaded)",
+                     so->init_arr_count);
     }
 
     free(file_data);

@@ -158,8 +158,11 @@ Even with all symbols resolved and code executable, the game could crash during 
 - [x] Early abort when code pages are not executable — shows diagnostic screen instead of crashing Switch
 - [x] **Fix code-page permissions** — ELF loader now uses libnx `jitCreate` / `jitTransitionToExecutable` for dual-view RW+Rx mapping
 - [x] All 120+ unresolved symbols shimmed — `sem_*`, `clock_gettime`, `nanosleep`, `gettimeofday`, wide-char, locale, Bionic fortified wrappers, networking stubs, `android_set_abort_message`, `sincosf`, `setjmp`/`longjmp`, `__sF`, `__stack_chk_guard`
-- [ ] **Get the game to produce any output** — next test will show whether it crashes at init or gets further
-- [ ] Investigate any new crash address from compat_log and identify the failing code path
+- [x] **Per-constructor logging** — each of the 417 `DT_INIT_ARRAY` constructors is logged (address + index) with an immediate flush before it's called, so the crash site shows in `compat_log.txt` when the Switch dies mid-constructor
+- [x] **Load all .so files** — all three libs loaded smallest-first so cross-library symbols are available before any constructors run
+- [x] **40+ new shims** — signal handling (`sigaction`, `sigemptyset/fill/add/del`, `pthread_sigmask`), thread naming (`pthread_setname_np`, `prctl`), process info (`gettid`, `getpid`, `getauxval`), memory (`mprotect`, `mmap/munmap`), barriers, `sleep`/`usleep`, `strtod_l`/`strtof_l`, `access`, `lstat`, `chmod`, `ioctl`, `pipe`, `dup/dup2`, `raise`, `kill`, `pthread_kill`, `__register_atfork`, `clock_nanosleep`
+- [ ] **Identify constructor crash** — need a new compat_log run; the last logged constructor before the crash is the culprit
+- [ ] Investigate and fix whatever the failing constructor is doing
 - [ ] Real touch input delivery via `AInputQueue` / `ALooper`
 
 ### Phase 1 — Touch input
@@ -171,7 +174,7 @@ Even with all symbols resolved and code executable, the game could crash during 
 ### Phase 2 — Stability
 
 - [ ] Real `pthread` support using libnx `Thread` (for games with background render/physics threads)
-- [ ] Handle multiple `.so` files — load all libs in dependency order, not just the largest
+- [x] Load all `.so` files in dependency order (smallest-first) — was previously only loading the largest
 - [ ] Implement `dl_iterate_phdr` so stack unwinders work
 - [ ] Save/load state via proper `internalDataPath` on the SD card
 - [ ] Catch and display fatal signal info on crash instead of hard-locking
@@ -197,6 +200,9 @@ Even with all symbols resolved and code executable, the game could crash during 
 
 ### [Unreleased / Current Build]
 
+- [x] **Per-constructor logging** — `elfRunCtors()` logs each constructor address + index and flushes to `compat_log.txt` before calling it; the last logged entry before a Switch crash pinpoints the culprit
+- [x] **Load all .so files** — replaced `findMainSo` with `findAllSos`; all three libs are loaded smallest-first so cross-library symbol resolution works before any constructors run
+- [x] **40+ new shims** — `sigaction`, `sigemptyset`, `sigfillset`, `sigaddset`, `sigdelset`, `sigismember`, `pthread_sigmask`, `sigprocmask`, `prctl`, `gettid`, `getpid`, `getuid`, `getgid`, `getauxval`, `mprotect`, `mmap`, `munmap`, `pipe`, `dup`, `dup2`, `ioctl`, `access`, `chmod`, `fchmod`, `lstat`, `pthread_setname_np`, `pthread_getname_np`, `pthread_attr_setstack`, `pthread_barrier_*`, `kill`, `raise`, `pthread_kill`, `sleep`, `usleep`, `clock_nanosleep`, `strtod_l`, `strtof_l`, `__register_atfork`
 - [x] **ELF loader: replace `memalign` + `svcSetMemoryPermission` with libnx JIT API** — `jitCreate` / `jitTransitionToWritable` / `jitTransitionToExecutable` give a dual-view RW+Rx mapping; the 0xD801 blocker is resolved
 - [x] **JIT dual-mapping**: relocations are written to the writable (`rw_addr`) side; GOT entries store exec (`rx_addr`) addresses; symtab/strtab are copied to heap before the JIT transition unmaps the write side
 - [x] **120+ new shims**: `setjmp`/`longjmp`, `sem_*`, all time functions, all wide-char and locale functions, all Bionic fortified string wrappers, networking stubs (return `ENOTSUP`), `sched_yield`, `syscall`, `sysconf`, `getcwd`, `dl_iterate_phdr`, `android_set_abort_message`, `sincosf`, `stpcpy`, `vasprintf`, `vsscanf`, `strerror`, `strtold`, `puts`/`putchar`, `rename`/`remove`, `__sF` data stub, `__stack_chk_guard` address, `pthread_mutexattr_*`, `__cxa_finalize`

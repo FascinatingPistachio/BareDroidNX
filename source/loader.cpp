@@ -111,10 +111,12 @@ static bool extractApk(const std::string& apk_path, const std::string& dest_dir,
     return true;
 }
 
-// ─── Find the main .so ────────────────────────────────────────────────────────
-static std::string findMainSo(const std::string& lib_dir) {
+// ─── Find all .so files ───────────────────────────────────────────────────────
+// Returns {size, path} pairs sorted smallest-first so dependency libs load
+// before the main game lib (which is typically the largest).
+static std::vector<std::pair<size_t, std::string>> findAllSos(const std::string& lib_dir) {
     DIR* d = opendir(lib_dir.c_str());
-    if (!d) return "";
+    if (!d) return {};
 
     std::vector<std::pair<size_t, std::string>> sos;
     struct dirent* ent;
@@ -128,14 +130,11 @@ static std::string findMainSo(const std::string& lib_dir) {
     }
     closedir(d);
 
-    if (sos.empty()) return "";
-
+    // Smallest first: dependency/helper libs before the main game lib
     std::sort(sos.begin(), sos.end(),
-              [](const auto& a, const auto& b){ return a.first > b.first; });
+              [](const auto& a, const auto& b){ return a.first < b.first; });
 
-    compatLogFmt("findMainSo: picked %s (%zu bytes)",
-                 sos[0].second.c_str(), sos[0].first);
-    return sos[0].second;
+    return sos;
 }
 
 // ─── EGL / window setup ───────────────────────────────────────────────────────
@@ -227,49 +226,65 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         return result;
     }
 
-    // ── 3. Find the main .so ─────────────────────────────────────────────────
-    if (cb) cb("Finding main library", "Scanning extracted libs...");
-    std::string main_so = findMainSo(lib_dir);
-    if (main_so.empty()) {
+    // ── 3. Find all .so files ────────────────────────────────────────────────
+    if (cb) cb("Finding libraries", "Scanning extracted libs...");
+    auto all_sos = findAllSos(lib_dir);
+    if (all_sos.empty()) {
         compatLog("No arm64 .so found in APK");
-        result.errorStage  = "Finding main library";
+        result.errorStage  = "Finding libraries";
         result.errorDetail = "No arm64-v8a .so found — APK may not support this architecture.";
         if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
+    for (auto& [sz, path] : all_sos) {
+        size_t sl = path.rfind('/');
+        const char* nm = (sl != std::string::npos) ? path.c_str() + sl + 1 : path.c_str();
+        compatLogFmt("findAllSos: %s (%zu bytes)", nm, sz);
+    }
+    // Main SO is largest (last in smallest-first vector)
+    const std::string& main_so = all_sos.back().second;
 
     // ── 4. Set up JNI ───────────────────────────────────────────────────────
     if (cb) cb("Setting up JNI", "Preparing Android runtime environment...");
     compatLog("Setting up JNI environment...");
     jniSetup(&g_compat);
 
-    // ── 5. Load the ELF ─────────────────────────────────────────────────────
-    {
-        // Show just the filename, not the full SD card path
-        size_t sl = main_so.rfind('/');
-        std::string soName = (sl != std::string::npos) ? main_so.substr(sl + 1) : main_so;
-        if (cb) cb("Loading ELF library", soName.c_str());
+    // ── 5. Load all ELF libraries (smallest-first = deps before main game) ──
+    // All SOs are loaded BEFORE any constructors run, so cross-library symbols
+    // are available during constructor calls.
+    elfResetCounts();
+    std::vector<LoadedSo*> loaded;
+    LoadedSo* so = nullptr;  // the main (largest) SO
+    for (auto& [sz, so_path] : all_sos) {
+        size_t sl = so_path.rfind('/');
+        const char* soName = (sl != std::string::npos)
+                             ? so_path.c_str() + sl + 1 : so_path.c_str();
+        if (cb) cb("Loading ELF library", soName);
+        compatLogFmt("Loading: %s", soName);
+        LoadedSo* loaded_so = elfLoad(so_path.c_str());
+        if (loaded_so) {
+            loaded.push_back(loaded_so);
+            if (so_path == main_so) so = loaded_so;
+        } else {
+            compatLogFmt("WARN: failed to load %s — skipping", soName);
+        }
     }
-    compatLog("Loading main library...");
-    LoadedSo* so = elfLoad(main_so.c_str());
+
     result.unresolved  = elfGetUnresolvedCount();
     result.svcPermCode = elfGetLastSvcPermCode();
+
     if (!so) {
-        compatLog("ELF load failed");
+        compatLog("Main .so failed to load");
         result.errorStage  = "Loading ELF library";
-        result.errorDetail = "ELF loader rejected the .so — may not be a valid ARM64 shared lib.";
+        result.errorDetail = "ELF loader rejected the main .so — may not be valid ARM64.";
         if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
     if (result.unresolved > 0) {
-        compatLogFmt("ELF: %d unresolved symbols (game may crash when those paths are hit)",
-                     result.unresolved);
+        compatLogFmt("ELF: %d total unresolved symbols across all libs", result.unresolved);
     }
 
     // ── 5b. Verify code pages are executable ────────────────────────────────
-    // JIT API (jitCreate/jitTransitionToExecutable) must have succeeded.
-    // If it failed, svcPermCode is non-zero and calling the game would cause
-    // a data-abort on non-executable memory — bail out here instead.
     if (cb) cb("Checking code permissions", "Verifying JIT code mapping...");
     if (result.svcPermCode != 0) {
         compatLogFmt("Aborting launch — JIT code mapping failed (0x%08X). "
@@ -280,6 +295,13 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
                              "Check that Atmosphere CFW is active and has JIT permission.";
         if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
+    }
+
+    // ── 5c. Run constructors for all SOs (dependency order, smallest first) ──
+    // Constructors are run now that all symbols from all SOs are visible.
+    if (cb) cb("Running constructors", "Initialising native library globals...");
+    for (LoadedSo* lso : loaded) {
+        elfRunCtors(lso);
     }
 
     // ── 6. Set up ANativeWindow ──────────────────────────────────────────────

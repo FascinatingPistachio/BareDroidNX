@@ -87,6 +87,8 @@ typedef struct {
 // ─── LoadedSo ─────────────────────────────────────────────────────────────────
 // One loaded ARM64 .so
 struct LoadedSo {
+    typedef void(*InitFn)();
+
     Jit          jit_mem;     // JIT memory handle (valid when using_jit is true)
     bool         using_jit = false;
 
@@ -103,6 +105,10 @@ struct LoadedSo {
     const char*  strtab;
     Elf64_Sym*   symtab;
     uint32_t     sym_count;
+
+    // DT_INIT_ARRAY: stored here so constructors can be run after all SOs load
+    InitFn*  init_arr       = nullptr;
+    size_t   init_arr_count = 0;
 
     std::string  path;        // path on SD card
 
@@ -143,11 +149,15 @@ typedef void (*ProgressCb)(const char* stage, const char* detail);
 // Returns the global compat layer (singleton)
 CompatLayer* compatGet();
 
-// Load a single .so from disk
+// Load a single .so from disk — does NOT run constructors (call elfRunCtors after)
 LoadedSo*    elfLoad(const char* path);
-// Number of unresolved symbols from the last elfLoad call
+// Reset accumulated unresolved-symbol count and JIT error code (call before loading a batch)
+void         elfResetCounts();
+// Run a loaded SO's DT_INIT_ARRAY constructors (with per-entry logging and flush)
+void         elfRunCtors(LoadedSo* so);
+// Number of unresolved symbols accumulated since last elfResetCounts() call
 int          elfGetUnresolvedCount();
-// Result of svcSetMemoryPermission from the last elfLoad call (0 = OK)
+// First JIT failure code since last elfResetCounts() call (0 = all OK)
 uint32_t     elfGetLastSvcPermCode();
 // Resolve a symbol across all loaded .so files, then shim table
 void*        shimResolve(const char* name);
