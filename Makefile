@@ -33,7 +33,12 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=c++17
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:=	-lnx
+LIBS	:=	-lSDL2_ttf -lSDL2_image -lSDL2main -lSDL2 \
+			-lfreetype -lharfbuzz \
+			-lpng -ljpeg -lwebp -lwebpdemux \
+			-lminizip -lbz2 -lz \
+			-lEGL -lGLESv2 -lglapi -ldrm_nouveau \
+			-lnx
 
 #---------------------------------------------------------------------------------
 LIBDIRS	:= $(PORTLIBS) $(LIBNX)
