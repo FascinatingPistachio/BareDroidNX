@@ -285,8 +285,13 @@ struct App {
 
         // Footer
         fill(0, SH - FOOTER_H, SW, FOOTER_H, C_FOOTER);
-        drawText(fSm, "A: Launch     Y: Rescan     +: Quit",
-            C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        if (appletGetOperationMode() == AppletOperationMode_Console) {
+            drawText(fSm, "Docked mode — games need handheld (touch screen) to be playable     +: Quit",
+                C_WARN, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        } else {
+            drawText(fSm, "A: Launch     Y: Rescan     +: Quit",
+                C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        }
 
         SDL_RenderPresent(rdr);
     }
@@ -308,8 +313,13 @@ struct App {
             drawText(fSm, detail, C_GRAY, 40, y);
 
         fill(0, SH - FOOTER_H, SW, FOOTER_H, C_FOOTER);
-        drawText(fSm, "Please wait — check sdmc:/BareDroidNX/compat_log.txt for details",
-                 C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        if (appletGetOperationMode() == AppletOperationMode_Console) {
+            drawText(fSm, "Docked mode — games need handheld (touch screen) to be playable  |  check compat_log.txt",
+                     C_WARN, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        } else {
+            drawText(fSm, "Please wait — check sdmc:/BareDroidNX/compat_log.txt for details",
+                     C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
+        }
 
         SDL_RenderPresent(rdr);
     }

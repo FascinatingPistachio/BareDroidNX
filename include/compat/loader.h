@@ -139,6 +139,8 @@ CompatLayer* compatGet();
 LoadedSo*    elfLoad(const char* path);
 // Number of unresolved symbols from the last elfLoad call
 int          elfGetUnresolvedCount();
+// Result of svcSetMemoryPermission from the last elfLoad call (0 = OK)
+uint32_t     elfGetLastSvcPermCode();
 // Resolve a symbol across all loaded .so files, then shim table
 void*        shimResolve(const char* name);
 // Called from jni_env.cpp to install JNI/VM tables into compat layer

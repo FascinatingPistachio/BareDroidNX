@@ -17,6 +17,10 @@ void* shimResolve(const char* name);
 static int g_unresolved_count = 0;
 int elfGetUnresolvedCount() { return g_unresolved_count; }
 
+// Result of the most recent svcSetMemoryPermission call (0 = success)
+static uint32_t g_last_svc_perm_code = 0;
+uint32_t elfGetLastSvcPermCode() { return g_last_svc_perm_code; }
+
 // All successfully loaded .so files (for cross-library symbol resolution)
 static std::vector<LoadedSo*> g_loaded_sos;
 
@@ -107,6 +111,7 @@ static void applyRela(LoadedSo* so, const Elf64_Rela* relas, size_t count) {
 // ─── elfLoad ──────────────────────────────────────────────────────────────────
 LoadedSo* elfLoad(const char* path) {
     g_unresolved_count = 0;
+    g_last_svc_perm_code = 0;
     compatLogFmt("ELF: loading %s", path);
 
     // Read the entire file
@@ -249,6 +254,7 @@ LoadedSo* elfLoad(const char* path) {
         uintptr_t seg_start = (uintptr_t)ALIGN_DOWN((uintptr_t)(base + ph.p_vaddr), 0x1000);
         size_t    seg_size  = (size_t)ALIGN_UP(ph.p_memsz + (ph.p_vaddr - ALIGN_DOWN(ph.p_vaddr, 0x1000)), 0x1000);
         Result res = svcSetMemoryPermission((void*)seg_start, seg_size, perm);
+        g_last_svc_perm_code = (uint32_t)res;
         compatLogFmt("ELF: svcSetMemPerm code seg: 0x%08X", res);
     }
 

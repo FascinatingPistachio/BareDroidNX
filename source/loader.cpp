@@ -252,7 +252,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     }
     compatLog("Loading main library...");
     LoadedSo* so = elfLoad(main_so.c_str());
-    result.unresolved = elfGetUnresolvedCount();
+    result.unresolved  = elfGetUnresolvedCount();
+    result.svcPermCode = elfGetLastSvcPermCode();
     if (!so) {
         compatLog("ELF load failed");
         result.errorStage  = "Loading ELF library";
@@ -263,6 +264,23 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     if (result.unresolved > 0) {
         compatLogFmt("ELF: %d unresolved symbols (game may crash when those paths are hit)",
                      result.unresolved);
+    }
+
+    // ── 5b. Verify code pages are executable ────────────────────────────────
+    // svcSetMemoryPermission returns 0xD801 on heap memory — calling into the
+    // game at this point would cause an immediate Switch fatal error (data abort
+    // from jumping into non-executable memory).  Bail out here and let the
+    // diagnostic screen explain the blocker instead of hard-crashing.
+    if (cb) cb("Checking code permissions", "Verifying game code is executable...");
+    if (result.svcPermCode != 0) {
+        compatLogFmt("Aborting launch — svcSetMemoryPermission failed (0x%08X). "
+                     "Calling into the game would cause a Switch crash.",
+                     result.svcPermCode);
+        result.errorStage  = "Setting code pages executable";
+        result.errorDetail = "svcSetMemoryPermission 0xD801 — heap memory cannot be made Rx. "
+                             "JIT API (svcMapCodeMemory) required. See Current Blockers in README.";
+        if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+        return result;
     }
 
     // ── 6. Set up ANativeWindow ──────────────────────────────────────────────
@@ -278,11 +296,6 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     if (!eglOk) {
         compatLog("EGL setup failed — continuing anyway (game may initialise EGL itself)");
     }
-
-    // Track svcSetMemoryPermission result — captured inside elfLoad via log; we
-    // read it back from the loader's last svc call by re-querying memory info.
-    // For now, store 0 (the elf_loader logs it; we'll surface it when we hook svc).
-    result.svcPermCode = 0;
 
     // ── 7. Set up ANativeActivity ────────────────────────────────────────────
     if (cb) cb("Setting up ANativeActivity", "Wiring Android activity callbacks...");

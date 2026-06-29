@@ -51,9 +51,11 @@ Our test target is **Hill Climb Racing 1.x** by Fingersoft — a simple 2D physi
 ### What We've Achieved So Far
 
 - The NRO launches from hbmenu and shows a working APK browser UI
-- The Switch correctly **decompiles and extracts the APK** — unpacking the game's native libraries and assets from the `.apk` file onto the SD card. This works!
+- The Switch correctly **extracts the APK** — unpacking the game's native libraries and assets from the `.apk` file onto the SD card. This works reliably.
 - The Switch loads and parses the ELF binary (`libgame.so`) and attempts to link it against our shim table
-- The on-screen progress display now shows each launch stage in real time
+- The on-screen progress display shows each launch stage in real time
+- **Docked mode is detected** — the footer warns you when launched in docked mode, since games require touch screen input (handheld only)
+- The launcher **no longer crashes the Switch** when `svcSetMemoryPermission` fails — instead it shows a clear diagnostic screen explaining the blocker
 - Full diagnostic output is written to `sdmc:/BareDroidNX/compat_log.txt`
 
 The game does not yet run — there are outstanding blockers (see [Current Blockers](#current-blockers)) — but the groundwork is there.
@@ -62,7 +64,7 @@ The game does not yet run — there are outstanding blockers (see [Current Block
 
 ## Controls
 
-> **Handheld mode only.** Android games use touch screen input. The Switch touchscreen only works in handheld mode — in docked mode there is no touch input, so games will be uncontrollable. BareDroidNX will warn you about this in a future update.
+> **Handheld mode only.** Android games use touch screen input. The Switch touchscreen only works in handheld mode — in docked mode there is no touch input, so games will be uncontrollable. BareDroidNX now detects docked mode and shows a warning in the footer.
 
 **BareDroidNX launcher controls (in the APK browser):**
 
@@ -155,6 +157,8 @@ These need to be added to `shim_table.cpp` one by one. Many will need real imple
 - [x] EGL setup (GLES 2 + 3 shim table passthrough)
 - [x] On-screen progress display during launch stages
 - [x] Full diagnostic result screen with error details
+- [x] Docked mode detection — footer warns when not in handheld mode
+- [x] Early abort when `svcSetMemoryPermission` fails — shows diagnostic screen instead of crashing Switch
 - [ ] **Fix code-page permissions** — use JIT-capable memory allocation (libnx `jit` API or `svcMapCodeMemory`)
 - [ ] Add missing libc shims (see [Current Blockers](#current-blockers) above)
 - [ ] Stub `sem_init`/`sem_wait`/`sem_post`/`sem_destroy`
@@ -167,8 +171,8 @@ These need to be added to `shim_table.cpp` one by one. Many will need real imple
 ### Phase 1 — Touch input
 
 - [ ] Map Switch touchscreen events to `AInputQueue` touch events delivered to the game
-- [ ] Add handheld-mode detection — show warning banner if launched while docked
-- [ ] Block launch in docked mode with a clear message ("Controls only work in handheld mode — the game requires touch input")
+- [x] Docked-mode detection — footer shows warning when not in handheld mode
+- [ ] Block launch in docked mode with a hard block + clear message ("Controls only work in handheld mode — the game requires touch input")
 
 ### Phase 2 — Stability
 
@@ -199,6 +203,10 @@ These need to be added to `shim_table.cpp` one by one. Many will need real imple
 
 ### [Unreleased / Current Build]
 
+- [x] Capture `svcSetMemoryPermission` result code from ELF loader and surface it on the diagnostic screen
+- [x] Abort launch early when code pages are not executable — shows diagnostic screen instead of hard-crashing the Switch
+- [x] Add "Checking code permissions" progress step so the user sees where the launch stopped
+- [x] Docked mode detection — footer turns amber and warns that games need handheld (touch screen) mode
 - [x] Add `LaunchResult` struct — `launchApk()` now returns structured error info instead of a bare bool
 - [x] Add `ProgressCb` callback — UI shows each launch stage on-screen in real time
 - [x] Replace "(loader not yet implemented)" stub screen with a proper diagnostic result screen showing failure stage, unresolved symbol count, and svc error codes
