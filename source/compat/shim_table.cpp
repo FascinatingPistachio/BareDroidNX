@@ -247,11 +247,16 @@ static int pt_rwlock_wrlock(void*)               { return 0; }
 static int pt_rwlock_unlock(void*)               { return 0; }
 static int pt_rwlock_destroy(void*)              { return 0; }
 static int pt_create(void** t, const void*, void* (*fn)(void*), void* arg) {
-    // We can't create real threads, so we log and return a fake handle.
-    // This will break threaded games, but prevents the crash.
-    compatLog("WARN: pthread_create called — threads not supported, ignoring");
-    *t = (void*)0x1;
-    (void)fn; (void)arg;
+    // Run the thread function synchronously so any init it does (setting flags,
+    // signalling condvars) completes before pthread_create returns.  Games that
+    // wait for a background init thread via pthread_cond_wait would otherwise
+    // spin forever because the thread never actually started.
+    compatLogFmt("pthread_create: running fn=%p synchronously", (void*)fn);
+    if (fn) {
+        fn(arg);
+        compatLog("pthread_create: fn returned");
+    }
+    if (t) *t = (void*)0x1;
     return 0;
 }
 static int pt_join(void*, void** ret)   { if (ret) *ret = nullptr; return 0; }

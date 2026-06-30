@@ -10,6 +10,13 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <setjmp.h>
+#include <stdarg.h>
+
+// Crash recovery shared with elf_loader.cpp and shim_table.cpp
+extern jmp_buf       g_recover_jmp;
+extern volatile bool g_in_recover;
+extern volatile int  g_recover_sig;
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 static FILE* g_compat_log = nullptr;
@@ -28,6 +35,25 @@ void compatLogFmt(const char* fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, va);
     va_end(va);
     compatLog(buf);
+}
+
+// ─── UI ring buffer ───────────────────────────────────────────────────────────
+// Last UILOG_N short messages, shown as a rolling sub-step log in showProgress.
+#define UILOG_N  5
+#define UILOG_W  92
+char g_ui_log[UILOG_N][UILOG_W] = {};
+int  g_ui_head = 0;   // next write index (not wrapped)
+int  g_ui_pct  = 0;   // progress bar percentage 0-100
+
+void compatUiLog(const char* msg) {
+    if (!msg) return;
+    int i = g_ui_head % UILOG_N;
+    strncpy(g_ui_log[i], msg, UILOG_W - 1);
+    g_ui_log[i][UILOG_W - 1] = '\0';
+    ++g_ui_head;
+}
+void compatUiSetPct(int pct) {
+    g_ui_pct = pct < 0 ? 0 : pct > 100 ? 100 : pct;
 }
 
 // ─── CompatLayer singleton ────────────────────────────────────────────────────
@@ -216,6 +242,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     mkdirp(asset_dir);
 
     // ── 2. Extract APK ───────────────────────────────────────────────────────
+    compatUiLog("Extracting APK...");
+    compatUiSetPct(2);
     if (cb) cb("Extracting APK", "Reading libs and assets from APK...");
     compatLog("Extracting APK...");
     if (!extractApk(apk_path, base_dir, cb)) {
@@ -227,6 +255,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     }
 
     // ── 3. Find all .so files ────────────────────────────────────────────────
+    compatUiLog("Scanning for .so files...");
+    compatUiSetPct(12);
     if (cb) cb("Finding libraries", "Scanning extracted libs...");
     auto all_sos = findAllSos(lib_dir);
     if (all_sos.empty()) {
@@ -245,6 +275,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     const std::string& main_so = all_sos.back().second;
 
     // ── 4. Set up JNI ───────────────────────────────────────────────────────
+    compatUiLog("Setting up JNI stubs...");
+    compatUiSetPct(15);
     if (cb) cb("Setting up JNI", "Preparing Android runtime environment...");
     compatLog("Setting up JNI environment...");
     jniSetup(&g_compat);
@@ -255,19 +287,35 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     elfResetCounts();
     std::vector<LoadedSo*> loaded;
     LoadedSo* so = nullptr;  // the main (largest) SO
+    int so_idx = 0;
+    int so_total = (int)all_sos.size();
     for (auto& [sz, so_path] : all_sos) {
         size_t sl = so_path.rfind('/');
         const char* soName = (sl != std::string::npos)
                              ? so_path.c_str() + sl + 1 : so_path.c_str();
+        {
+            char ub[80];
+            snprintf(ub, sizeof(ub), "Loading %s...", soName);
+            compatUiLog(ub);
+        }
+        int pct = 18 + (so_total > 0 ? 40 * so_idx / so_total : 0);
+        compatUiSetPct(pct);
         if (cb) cb("Loading ELF library", soName);
         compatLogFmt("Loading: %s", soName);
         LoadedSo* loaded_so = elfLoad(so_path.c_str());
         if (loaded_so) {
             loaded.push_back(loaded_so);
             if (so_path == main_so) so = loaded_so;
+            char ub[80];
+            snprintf(ub, sizeof(ub), "Loaded %s OK", soName);
+            compatUiLog(ub);
         } else {
             compatLogFmt("WARN: failed to load %s — skipping", soName);
+            char ub[80];
+            snprintf(ub, sizeof(ub), "WARN: %s failed to load", soName);
+            compatUiLog(ub);
         }
+        ++so_idx;
     }
 
     result.unresolved  = elfGetUnresolvedCount();
@@ -298,13 +346,15 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     }
 
     // ── 5c. Run constructors for all SOs (dependency order, smallest first) ──
-    // Constructors are run now that all symbols from all SOs are visible.
+    compatUiSetPct(58);
     if (cb) cb("Running constructors", "Initialising native library globals...");
     for (LoadedSo* lso : loaded) {
-        elfRunCtors(lso);
+        elfRunCtors(lso, cb);
     }
 
     // ── 6. Set up ANativeWindow ──────────────────────────────────────────────
+    compatUiLog("Setting up ANativeWindow...");
+    compatUiSetPct(80);
     if (cb) cb("Setting up window", "Initialising display surface...");
     compatLog("Setting up window...");
     ANativeWindow* win = &g_compat.window;
@@ -319,6 +369,8 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     }
 
     // ── 7. Set up ANativeActivity ────────────────────────────────────────────
+    compatUiLog("Setting up ANativeActivity...");
+    compatUiSetPct(84);
     if (cb) cb("Setting up ANativeActivity", "Wiring Android activity callbacks...");
     compatLog("Setting up ANativeActivity...");
     ANativeActivity* act = &g_compat.activity;
@@ -341,12 +393,27 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     typedef int32_t (*JNI_OnLoad_fn)(JavaVM**, void*);
     JNI_OnLoad_fn jni_onload = (JNI_OnLoad_fn)so->findSym("JNI_OnLoad");
     if (jni_onload) {
-        if (cb) cb("Calling JNI_OnLoad", "Initialising native library...");
+        compatUiLog("JNI_OnLoad: starting...");
+        compatUiSetPct(88);
+        if (cb) cb("Calling JNI_OnLoad", "Initialising native library (check log)...");
         compatLog("Calling JNI_OnLoad...");
-        int32_t ver = jni_onload((JavaVM**)g_compat.vm_outer, nullptr);
-        compatLogFmt("JNI_OnLoad returned: 0x%X", ver);
+        g_in_recover = true; g_recover_sig = 0;
+        if (setjmp(g_recover_jmp) == 0) {
+            int32_t ver = jni_onload((JavaVM**)g_compat.vm_outer, nullptr);
+            g_in_recover = false;
+            compatLogFmt("JNI_OnLoad returned: 0x%X", ver);
+            compatUiLog("JNI_OnLoad: OK");
+            if (cb) cb("JNI_OnLoad done", "Native library registered");
+            compatUiSetPct(92);
+        } else {
+            g_in_recover = false;
+            compatLogFmt("JNI_OnLoad FAULT sig=%d — skipped", g_recover_sig);
+            compatUiLog("JNI_OnLoad: FAULT (skipped)");
+            if (cb) cb("JNI_OnLoad faulted", "Skipping — check compat_log.txt");
+        }
     } else {
         compatLog("JNI_OnLoad not found (OK for NativeActivity games)");
+        compatUiLog("No JNI_OnLoad found");
     }
 
     // ── 9. Call ANativeActivity_onCreate ─────────────────────────────────────
@@ -365,10 +432,21 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         }
     }
 
+    compatUiLog("ANativeActivity_onCreate: starting...");
+    compatUiSetPct(94);
     if (cb) cb("Calling ANativeActivity_onCreate", "Starting game logic...");
     compatLog("Calling ANativeActivity_onCreate...");
-    on_create(act, nullptr, 0);
-    compatLog("onCreate returned");
+    g_in_recover = true; g_recover_sig = 0;
+    if (setjmp(g_recover_jmp) == 0) {
+        on_create(act, nullptr, 0);
+        g_in_recover = false;
+        compatLog("onCreate returned");
+        compatUiLog("ANativeActivity_onCreate: returned");
+    } else {
+        g_in_recover = false;
+        compatLogFmt("ANativeActivity_onCreate FAULT sig=%d — skipped", g_recover_sig);
+        compatUiLog("onCreate: FAULT (skipped)");
+    }
 
     // ── 10. Drive lifecycle ───────────────────────────────────────────────────
     ANativeActivityCallbacks* cbs = &g_compat.callbacks;

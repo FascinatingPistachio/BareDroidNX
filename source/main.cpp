@@ -335,27 +335,66 @@ struct App {
     }
 
     // ------------------------------------------------------------------
-    // Show the current launch stage on-screen so the user isn't staring
-    // at a frozen display while extraction / ELF loading runs.
+    // Show the current launch stage on-screen with a progress bar and
+    // a rolling sub-step log pulled from the compatUiLog ring buffer.
     // ------------------------------------------------------------------
-    void showProgress(const char* stage, const char* detail) {
+    void showProgress(const char* stage, const char* /*detail*/) {
+        // Ring buffer exported from loader.cpp
+        extern char g_ui_log[5][92];
+        extern int  g_ui_head;
+        extern int  g_ui_pct;
+
         fill(0, 0, SW, SH, C_BG);
         fill(0, 0, SW, HEADER_H, C_HEADER);
         drawText(fLg, "BareDroidNX", C_WHITE, 30, (HEADER_H - 28) / 2);
         drawText(fSm, "Launching...", C_DIM, SW - 160, (HEADER_H - 18) / 2);
 
-        int y = LIST_Y + 50;
+        int y = LIST_Y + 28;
+
+        // Stage label
         drawText(fLg, stage ? stage : "Working...", C_WHITE, 40, y);
-        y += 48;
-        if (detail && detail[0])
-            drawText(fSm, detail, C_GRAY, 40, y);
+        y += 46;
+
+        // Progress bar
+        static const int BAR_X = 40;
+        static const int BAR_W = SW - 80;
+        static const int BAR_H = 18;
+        // Track background
+        fill(BAR_X, y, BAR_W, BAR_H, {28, 28, 55, 255});
+        // Fill — Google blue tint
+        int fillW = g_ui_pct > 0 ? (BAR_W * g_ui_pct / 100) : 0;
+        if (fillW > 0)
+            fill(BAR_X, y, fillW, BAR_H, {66, 133, 244, 255});
+        // Border
+        SDL_SetRenderDrawColor(rdr, 70, 70, 130, 255);
+        SDL_Rect barBorder = {BAR_X, y, BAR_W, BAR_H};
+        SDL_RenderDrawRect(rdr, &barBorder);
+        // Percentage label right of bar
+        char pctBuf[8];
+        snprintf(pctBuf, sizeof(pctBuf), "%d%%", g_ui_pct);
+        drawText(fSm, pctBuf, C_DIM, BAR_X + BAR_W + 6, y);
+        y += BAR_H + 20;
+
+        // Sub-step rolling log — show last 4 lines, oldest at top, newest at bottom
+        static const SDL_Color C_STEP = {110, 155, 230, 255};
+        static const SDL_Color C_STEP_DIM = {70, 100, 160, 255};
+        for (int i = 3; i >= 0; i--) {
+            if (g_ui_head == 0) { y += 24; continue; }
+            int slot = ((g_ui_head - 1 - i) % 5 + 5) % 5;
+            if (g_ui_log[slot][0]) {
+                std::string line = std::string(i == 0 ? "> " : "  ") + g_ui_log[slot];
+                SDL_Color col = (i == 0) ? C_STEP : C_STEP_DIM;
+                drawText(fSm, clamp(fSm, line, SW - 80), col, 40, y);
+            }
+            y += 24;
+        }
 
         fill(0, SH - FOOTER_H, SW, FOOTER_H, C_FOOTER);
         if (appletGetOperationMode() == AppletOperationMode_Console) {
-            drawText(fSm, "Docked mode — games need handheld (touch screen) to be playable  |  check compat_log.txt",
+            drawText(fSm, "Docked — check compat_log.txt",
                      C_WARN, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         } else {
-            drawText(fSm, "Please wait — check sdmc:/BareDroidNX/compat_log.txt for details",
+            drawText(fSm, "Please wait — check sdmc:/BareDroidNX/compat_log.txt",
                      C_DIM, 30, SH - FOOTER_H + (FOOTER_H - 18) / 2);
         }
 

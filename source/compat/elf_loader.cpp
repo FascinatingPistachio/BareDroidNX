@@ -9,32 +9,34 @@
 #include <signal.h>
 #include <switch/arm/thread_context.h>
 
-// ─── Constructor crash recovery ───────────────────────────────────────────────
+// ─── Shared crash recovery ────────────────────────────────────────────────────
+// Non-static so loader.cpp and shim_table.cpp can also set up recovery scopes.
 // Override libnx's weak __libnx_exception_handler so hardware faults (data
-// aborts, instruction aborts) in game constructors longjmp back to our recovery
-// point instead of terminating the process.
-static jmp_buf        s_ctor_jmp;
-static volatile bool  s_in_ctor = false;
-static volatile int   s_ctor_sig = 0;
+// aborts, instruction aborts) longjmp back to the nearest active recovery point.
+jmp_buf       g_recover_jmp;
+volatile bool g_in_recover = false;
+volatile int  g_recover_sig = 0;
 
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
-    if (s_in_ctor) {
-        s_ctor_sig = (int)ctx->error_desc;
-        longjmp(s_ctor_jmp, 1);
+    if (g_in_recover) {
+        g_recover_sig = (int)ctx->error_desc;
+        longjmp(g_recover_jmp, 1);
     }
-    // Not in a constructor — re-raise as fatal (write to exceptiondump)
+    // Not inside a recovery scope — re-raise as fatal.
     extern ThreadExceptionDump __nx_exceptiondump;
     __nx_exceptiondump = *ctx;
     svcReturnFromException(0xf801);
 }
 
 static void ctor_crash_handler(int sig) {
-    if (s_in_ctor) { s_ctor_sig = sig; longjmp(s_ctor_jmp, 1); }
+    if (g_in_recover) { g_recover_sig = sig; longjmp(g_recover_jmp, 1); }
 }
 
 // Log helpers (shared across compat/ via extern)
 extern void compatLog(const char* msg);
 extern void compatLogFmt(const char* fmt, ...);
+extern void compatUiLog(const char* msg);
+extern void compatUiSetPct(int pct);
 
 // External shim table from shim_table.cpp
 void* shimResolve(const char* name);
@@ -56,7 +58,7 @@ void elfResetCounts() {
 // Run DT_INIT_ARRAY constructors stored by elfLoad.  Logs each entry before
 // calling it (and flushes via compatLog) so the crash site is visible in the
 // log when the Switch dies inside a constructor.
-void elfRunCtors(LoadedSo* so) {
+void elfRunCtors(LoadedSo* so, ProgressCb cb) {
     if (!so || !so->init_arr || so->init_arr_count == 0) return;
     size_t sl = so->path.rfind('/');
     const char* soname = (sl != std::string::npos)
@@ -67,13 +69,10 @@ void elfRunCtors(LoadedSo* so) {
     // (crash reporting only), so skip its constructors entirely.
     if (strstr(soname, "applovin") != nullptr) {
         compatLogFmt("ELF: %s: SKIP constructors (crash-reporter, not needed)", soname);
+        compatUiLog("applovin: skip ctors (crash-reporter)");
         return;
     }
 
-    // Install crash-recovery handler so a faulting constructor doesn't kill the
-    // whole process.  If libnx delivers SIGSEGV/SIGBUS, we longjmp back and
-    // mark that ctor as failed.  If the kernel kills us directly (no signal),
-    // the log still shows which ctor number we were attempting.
     signal(SIGSEGV, ctor_crash_handler);
     signal(SIGBUS,  ctor_crash_handler);
     signal(SIGILL,  ctor_crash_handler);
@@ -83,34 +82,55 @@ void elfRunCtors(LoadedSo* so) {
     // DT_INIT runs before DT_INIT_ARRAY (same as Android linker order)
     if (so->init_fn) {
         compatLogFmt("ELF: %s: DT_INIT @%p", soname, (void*)so->init_fn);
-        s_in_ctor = true; s_ctor_sig = 0;
-        if (setjmp(s_ctor_jmp) == 0) {
+        g_in_recover = true; g_recover_sig = 0;
+        if (setjmp(g_recover_jmp) == 0) {
             so->init_fn();
-            s_in_ctor = false;
+            g_in_recover = false;
             compatLog("ELF: DT_INIT OK");
         } else {
-            s_in_ctor = false;
-            compatLogFmt("ELF: DT_INIT FAULT sig=%d — skipped", s_ctor_sig);
+            g_in_recover = false;
+            compatLogFmt("ELF: DT_INIT FAULT sig=%d — skipped", g_recover_sig);
         }
     }
 
     compatLogFmt("ELF: %s: running %zu constructors", soname, so->init_arr_count);
-    for (size_t k = 0; k < so->init_arr_count; k++) {
+    {
+        char ub[80];
+        snprintf(ub, sizeof(ub), "%s: running %zu ctors", soname, so->init_arr_count);
+        compatUiLog(ub);
+    }
+    compatUiSetPct(60);
+
+    const size_t n = so->init_arr_count;
+    // Emit a UI update every ~50 ctors and at the end
+    const size_t ui_interval = (n > 50) ? (n / 8) : n;
+
+    for (size_t k = 0; k < n; k++) {
         LoadedSo::InitFn fn = so->init_arr[k];
         if (!fn || fn == (LoadedSo::InitFn)(uintptr_t)-1) { skipped++; continue; }
 
-        compatLogFmt("ELF: ctor[%zu/%zu] @%p", k+1, so->init_arr_count, (void*)fn);
-        s_in_ctor = true; s_ctor_sig = 0;
-        if (setjmp(s_ctor_jmp) == 0) {
+        compatLogFmt("ELF: ctor[%zu/%zu] @%p", k+1, n, (void*)fn);
+        g_in_recover = true; g_recover_sig = 0;
+        if (setjmp(g_recover_jmp) == 0) {
             fn();
-            s_in_ctor = false;
-            compatLogFmt("ELF: ctor[%zu/%zu] OK", k + 1, so->init_arr_count);
+            g_in_recover = false;
+            compatLogFmt("ELF: ctor[%zu/%zu] OK", k + 1, n);
             ok++;
         } else {
-            s_in_ctor = false;
+            g_in_recover = false;
             compatLogFmt("ELF: ctor[%zu/%zu] FAULT sig=%d — skipped",
-                         k + 1, so->init_arr_count, s_ctor_sig);
+                         k + 1, n, g_recover_sig);
             failed++;
+        }
+
+        if ((k + 1) % ui_interval == 0 || k + 1 == n) {
+            char ub[80];
+            snprintf(ub, sizeof(ub), "%s ctor[%zu/%zu] ok=%d fault=%d",
+                     soname, k + 1, n, ok, failed);
+            compatUiLog(ub);
+            int pct = 60 + (int)(20 * (k + 1) / n);
+            compatUiSetPct(pct);
+            if (cb) cb("Running constructors", ub);
         }
     }
     signal(SIGSEGV, SIG_DFL);
@@ -118,6 +138,11 @@ void elfRunCtors(LoadedSo* so) {
     signal(SIGILL,  SIG_DFL);
     compatLogFmt("ELF: %s: ctors done ok=%d failed=%d skipped=%d",
                  soname, ok, failed, skipped);
+    {
+        char ub[80];
+        snprintf(ub, sizeof(ub), "%s: ctors done ok=%d failed=%d", soname, ok, failed);
+        compatUiLog(ub);
+    }
 }
 
 // All successfully loaded .so files (for cross-library symbol resolution)

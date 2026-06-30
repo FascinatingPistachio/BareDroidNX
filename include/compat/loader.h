@@ -158,10 +158,16 @@ CompatLayer* compatGet();
 LoadedSo*    elfLoad(const char* path);
 // Reset accumulated unresolved-symbol count and JIT error code (call before loading a batch)
 void         elfResetCounts();
-// Run a loaded SO's DT_INIT_ARRAY constructors (with per-entry logging and flush)
-void         elfRunCtors(LoadedSo* so);
+// Run a loaded SO's DT_INIT_ARRAY constructors. cb (optional) is called periodically
+// during the run so the UI can show sub-step progress.
+void         elfRunCtors(LoadedSo* so, ProgressCb cb = nullptr);
 // Number of unresolved symbols accumulated since last elfResetCounts() call
 int          elfGetUnresolvedCount();
+
+// UI ring buffer — write a short message to the on-screen rolling log
+void         compatUiLog(const char* msg);
+// Set the progress bar percentage (0–100)
+void         compatUiSetPct(int pct);
 // First JIT failure code since last elfResetCounts() call (0 = all OK)
 uint32_t     elfGetLastSvcPermCode();
 // Resolve a symbol across all loaded .so files, then shim table

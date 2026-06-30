@@ -69,7 +69,7 @@ static jfieldID s_GetStaticFieldID(JNIEnv*, jclass, const char* n, const char* s
     return DUMMY_FIELD;
 }
 
-// Return-type stubs
+// Return-type stubs (generic, for slots that don't need per-call logging)
 static jobject  s_RetObj(JNIEnv*, ...)   { return nullptr; }
 static jobject  s_RetObjV(JNIEnv*, jobject, jmethodID, va_list) { return nullptr; }
 static jboolean s_RetBool(JNIEnv*, ...)  { return JNI_FALSE; }
@@ -84,6 +84,44 @@ static jdouble  s_RetDouble(JNIEnv*, ...) { return 0.0; }
 static jdouble  s_RetDoubleV(JNIEnv*, jobject, jmethodID, va_list) { return 0.0; }
 static void     s_RetVoid(JNIEnv*, ...)   {}
 static void     s_RetVoidV(JNIEnv*, jobject, jmethodID, va_list) {}
+
+// Named Call*Method stubs — log the call type so we can see where JNI_OnLoad hangs.
+static jobject s_CallObjectMethod(JNIEnv*, jobject, jmethodID, ...) {
+    compatLog("JNI CallObjectMethod");  return nullptr;
+}
+static jobject s_CallObjectMethodV(JNIEnv*, jobject, jmethodID, va_list) {
+    compatLog("JNI CallObjectMethodV"); return nullptr;
+}
+static jobject s_CallStaticObjectMethod(JNIEnv*, jclass, jmethodID, ...) {
+    compatLog("JNI CallStaticObjectMethod");  return nullptr;
+}
+static jobject s_CallStaticObjectMethodV(JNIEnv*, jclass, jmethodID, va_list) {
+    compatLog("JNI CallStaticObjectMethodV"); return nullptr;
+}
+static void s_CallVoidMethod(JNIEnv*, jobject, jmethodID, ...) {
+    compatLog("JNI CallVoidMethod");
+}
+static void s_CallVoidMethodV(JNIEnv*, jobject, jmethodID, va_list) {
+    compatLog("JNI CallVoidMethodV");
+}
+static void s_CallStaticVoidMethod(JNIEnv*, jclass, jmethodID, ...) {
+    compatLog("JNI CallStaticVoidMethod");
+}
+static void s_CallStaticVoidMethodV(JNIEnv*, jclass, jmethodID, va_list) {
+    compatLog("JNI CallStaticVoidMethodV");
+}
+static jboolean s_CallBoolMethod(JNIEnv*, jobject, jmethodID, ...) {
+    compatLog("JNI CallBooleanMethod"); return JNI_FALSE;
+}
+static jint s_CallIntMethod(JNIEnv*, jobject, jmethodID, ...) {
+    compatLog("JNI CallIntMethod"); return 0;
+}
+static jlong s_CallLongMethod(JNIEnv*, jobject, jmethodID, ...) {
+    compatLog("JNI CallLongMethod"); return 0LL;
+}
+static jobject s_NewObject(JNIEnv*, jclass, jmethodID, ...) {
+    compatLog("JNI NewObject"); return nullptr;
+}
 
 // Fields (get/set)
 static jobject  s_GetObjField(JNIEnv*, jobject, jfieldID) { return nullptr; }
@@ -230,30 +268,30 @@ void jniSetup(CompatLayer* cl) {
     g_jni_funcs[25] = (void*)s_NewLocalRef;
     g_jni_funcs[26] = (void*)s_EnsureLocalCapacity;
     g_jni_funcs[27] = (void*)s_AllocObject;
-    g_jni_funcs[28] = (void*)s_RetObj;       // NewObject (varargs)
-    g_jni_funcs[29] = (void*)s_RetObjV;      // NewObjectV
-    g_jni_funcs[30] = (void*)s_RetObj;       // NewObjectA
+    g_jni_funcs[28] = (void*)s_NewObject;     // NewObject (varargs)
+    g_jni_funcs[29] = (void*)s_RetObjV;       // NewObjectV
+    g_jni_funcs[30] = (void*)s_NewObject;     // NewObjectA
     g_jni_funcs[31] = (void*)s_GetObjectClass;
     g_jni_funcs[32] = (void*)s_IsInstanceOf;
     g_jni_funcs[33] = (void*)s_GetMethodID;
     // CallObjectMethod 34-36
-    g_jni_funcs[34] = (void*)s_RetObj;
-    g_jni_funcs[35] = (void*)s_RetObjV;
-    g_jni_funcs[36] = (void*)s_RetObj;
+    g_jni_funcs[34] = (void*)s_CallObjectMethod;
+    g_jni_funcs[35] = (void*)s_CallObjectMethodV;
+    g_jni_funcs[36] = (void*)s_CallObjectMethod;
     // CallBooleanMethod 37-39
-    g_jni_funcs[37] = (void*)s_RetBool;
+    g_jni_funcs[37] = (void*)s_CallBoolMethod;
     g_jni_funcs[38] = (void*)s_RetBoolV;
-    g_jni_funcs[39] = (void*)s_RetBool;
+    g_jni_funcs[39] = (void*)s_CallBoolMethod;
     // CallByte/Char/ShortMethod 40-48
     for (int i = 40; i <= 48; i++) g_jni_funcs[i] = (void*)s_RetInt;
     // CallIntMethod 49-51
-    g_jni_funcs[49] = (void*)s_RetInt;
+    g_jni_funcs[49] = (void*)s_CallIntMethod;
     g_jni_funcs[50] = (void*)s_RetIntV;
-    g_jni_funcs[51] = (void*)s_RetInt;
+    g_jni_funcs[51] = (void*)s_CallIntMethod;
     // CallLongMethod 52-54
-    g_jni_funcs[52] = (void*)s_RetLong;
+    g_jni_funcs[52] = (void*)s_CallLongMethod;
     g_jni_funcs[53] = (void*)s_RetLongV;
-    g_jni_funcs[54] = (void*)s_RetLong;
+    g_jni_funcs[54] = (void*)s_CallLongMethod;
     // CallFloat 55-57
     g_jni_funcs[55] = (void*)s_RetFloat;
     g_jni_funcs[56] = (void*)s_RetFloatV;
@@ -263,9 +301,9 @@ void jniSetup(CompatLayer* cl) {
     g_jni_funcs[59] = (void*)s_RetDoubleV;
     g_jni_funcs[60] = (void*)s_RetDouble;
     // CallVoidMethod 61-63
-    g_jni_funcs[61] = (void*)s_RetVoid;
-    g_jni_funcs[62] = (void*)s_RetVoidV;
-    g_jni_funcs[63] = (void*)s_RetVoid;
+    g_jni_funcs[61] = (void*)s_CallVoidMethod;
+    g_jni_funcs[62] = (void*)s_CallVoidMethodV;
+    g_jni_funcs[63] = (void*)s_CallVoidMethod;
     // Nonvirtual 64-93 (all void stubs)
     for (int i = 64; i <= 93; i++) g_jni_funcs[i] = (void*)s_RetVoid;
     // GetFieldID, Get/SetXxxField 94-112
@@ -283,9 +321,9 @@ void jniSetup(CompatLayer* cl) {
     // GetStaticMethodID 113
     g_jni_funcs[113] = (void*)s_GetStaticMethodID;
     // CallStaticXxxMethod 114-143
-    g_jni_funcs[114] = (void*)s_RetObj;
-    g_jni_funcs[115] = (void*)s_RetObjV;
-    g_jni_funcs[116] = (void*)s_RetObj;
+    g_jni_funcs[114] = (void*)s_CallStaticObjectMethod;
+    g_jni_funcs[115] = (void*)s_CallStaticObjectMethodV;
+    g_jni_funcs[116] = (void*)s_CallStaticObjectMethod;
     g_jni_funcs[117] = (void*)s_RetBool;
     g_jni_funcs[118] = (void*)s_RetBoolV;
     g_jni_funcs[119] = (void*)s_RetBool;
@@ -302,9 +340,9 @@ void jniSetup(CompatLayer* cl) {
     g_jni_funcs[138] = (void*)s_RetDouble;
     g_jni_funcs[139] = (void*)s_RetDoubleV;
     g_jni_funcs[140] = (void*)s_RetDouble;
-    g_jni_funcs[141] = (void*)s_RetVoid;
-    g_jni_funcs[142] = (void*)s_RetVoidV;
-    g_jni_funcs[143] = (void*)s_RetVoid;
+    g_jni_funcs[141] = (void*)s_CallStaticVoidMethod;
+    g_jni_funcs[142] = (void*)s_CallStaticVoidMethodV;
+    g_jni_funcs[143] = (void*)s_CallStaticVoidMethod;
     // GetStaticFieldID + Get/SetStaticXxxField 144-162
     g_jni_funcs[144] = (void*)s_GetStaticFieldID;
     g_jni_funcs[145] = (void*)s_GetStaticObjField;
