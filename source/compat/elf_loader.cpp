@@ -48,8 +48,11 @@ void elfRunCtors(LoadedSo* so) {
     for (size_t k = 0; k < so->init_arr_count; k++) {
         LoadedSo::InitFn fn = so->init_arr[k];
         if (fn && fn != (LoadedSo::InitFn)(uintptr_t)-1) {
-            // compatLog flushes after every write — crash site will show here
-            compatLogFmt("ELF: ctor[%zu/%zu] @%p", k + 1, so->init_arr_count, (void*)fn);
+            // Dump first 4 instructions to verify JIT copy and identify crash type
+            const uint32_t* code = (const uint32_t*)(const void*)fn;
+            compatLogFmt("ELF: ctor[%zu/%zu] @%p [%08x %08x %08x %08x]",
+                         k + 1, so->init_arr_count, (void*)fn,
+                         code[0], code[1], code[2], code[3]);
             fn();
             compatLogFmt("ELF: ctor[%zu/%zu] OK", k + 1, so->init_arr_count);
         }
