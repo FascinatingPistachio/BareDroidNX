@@ -22,13 +22,36 @@ extern volatile uint32_t g_recover_esr;
 // ─── Logging ──────────────────────────────────────────────────────────────────
 static FILE* g_compat_log = nullptr;
 
-void compatLog(const char* msg) {
-    if (g_compat_log) {
-        fputs(msg, g_compat_log);
+// Dedup state: collapse consecutive identical lines into "msg x<N>"
+static char g_log_last[512] = {};
+static int  g_log_repeat    = 0;
+
+static void logFlushDedup() {
+    if (!g_compat_log || g_log_repeat == 0) return;
+    if (g_log_repeat == 1) {
+        fputs(g_log_last, g_compat_log);
         fputc('\n', g_compat_log);
-        fflush(g_compat_log);
+    } else {
+        char buf[540];
+        snprintf(buf, sizeof(buf), "%s  x%d", g_log_last, g_log_repeat);
+        fputs(buf, g_compat_log);
+        fputc('\n', g_compat_log);
     }
+    fflush(g_compat_log);
+    g_log_repeat = 0;
 }
+
+void compatLog(const char* msg) {
+    if (!g_compat_log) return;
+    if (g_log_repeat > 0 && strcmp(msg, g_log_last) == 0) {
+        g_log_repeat++;
+        return;
+    }
+    logFlushDedup();
+    snprintf(g_log_last, sizeof(g_log_last), "%s", msg);
+    g_log_repeat = 1;
+}
+
 void compatLogFmt(const char* fmt, ...) {
     char buf[512];
     va_list va;
@@ -274,7 +297,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             compatLog("Extraction failed");
             result.errorStage  = "Extracting APK";
             result.errorDetail = "Could not open or read the APK file.";
-            if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+            if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }
         // Write .installed marker
@@ -298,7 +321,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         compatLog("No arm64 .so found in APK");
         result.errorStage  = "Finding libraries";
         result.errorDetail = "No arm64-v8a .so found — APK may not support this architecture.";
-        if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+        if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
     for (auto& [sz, path] : all_sos) {
@@ -360,7 +383,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         compatLog("Main .so failed to load");
         result.errorStage  = "Loading ELF library";
         result.errorDetail = "ELF loader rejected the main .so — may not be valid ARM64.";
-        if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+        if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
     if (result.unresolved > 0) {
@@ -376,7 +399,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         result.errorStage  = "Setting code pages executable";
         result.errorDetail = "JIT allocation failed — code segment is not executable. "
                              "Check that Atmosphere CFW is active and has JIT permission.";
-        if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+        if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
         return result;
     }
 
@@ -564,7 +587,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
             }
 
             result.ok = true;
-            if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
+            if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }
     }
@@ -598,7 +621,7 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
     compatLog("Entering game loop (game drives rendering via EGL)");
     compatLog("Note: background threads are stubbed — game may appear frozen");
 
-    if (g_compat_log) { fflush(g_compat_log); fclose(g_compat_log); g_compat_log = nullptr; }
+    if (g_compat_log) { logFlushDedup(); fclose(g_compat_log); g_compat_log = nullptr; }
 
     result.ok = true;
     return result;
