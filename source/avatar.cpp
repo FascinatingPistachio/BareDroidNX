@@ -5,8 +5,10 @@
 #include <mutex>
 #include <atomic>
 
-static const char* AVATAR_URL =
-    "https://dynamicavatarapi.vercel.app/api/github/avatar?user=Aaronateataco&size=256";
+// GitHub serves the account's current avatar directly at this URL (302s to
+// avatars.githubusercontent.com) — no third-party API, no auth, no rate
+// limit concerns like the REST API has.
+static const char* AVATAR_URL = "https://github.com/aaronateataco.png?size=256";
 static const char* AVATAR_CACHE  = "sdmc:/BareDroidNX/avatar_cache.bin";
 static const int   REFRESH_SECS  = 300;  // re-check every 5 minutes
 static const int   NET_WAIT_SECS = 10;   // give nifm this long to report "connected" per cycle
