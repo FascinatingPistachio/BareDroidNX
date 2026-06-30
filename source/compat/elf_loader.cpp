@@ -15,71 +15,6 @@ extern void compatLogFmt(const char* fmt, ...);
 extern void compatUiLog(const char* msg);
 extern void compatUiSetPct(int pct);
 
-// ─── JIT write-fault emulation ────────────────────────────────────────────────
-// rx_addr (RX) and rw_addr (RW) are dual views of the same physical pages from
-// jitCreate(JitType_CodeMemory).  Writes to rx_addr raise a permission fault
-// (ESR EC=0x24, WnR=1, DFSC=0x0f).  We intercept them in the exception handler,
-// decode the ARM64 store instruction, replay the write through rw_addr, advance
-// PC past the faulting instruction, and resume — so ctors and JNI_OnLoad can
-// initialize globals without repeatedly crashing.
-struct JitEmuRegion {
-    uint64_t rx_alloc;
-    uint64_t rw_alloc;
-    size_t   size;
-};
-static JitEmuRegion g_jit_emu_regions[4];
-static int          g_jit_emu_count = 0;
-
-static bool emulateStore(ThreadExceptionDump* ctx) {
-    uint64_t far = ctx->far.x;
-    for (int i = 0; i < g_jit_emu_count; i++) {
-        const JitEmuRegion& r = g_jit_emu_regions[i];
-        if (far < r.rx_alloc || far >= r.rx_alloc + r.size) continue;
-
-        uint32_t insn   = *(const uint32_t*)ctx->pc.x;  // rx_addr is readable
-        uint64_t rw_dst = r.rw_alloc + (far - r.rx_alloc);
-
-        auto getReg = [&](unsigned rt) -> uint64_t {
-            if (rt < 29) return ctx->cpu_gprs[rt].x;
-            if (rt == 29) return ctx->fp.x;
-            if (rt == 30) return ctx->lr.x;
-            return 0;  // x31 / xzr
-        };
-
-        // SIMD/FP stores have bit[26]=1 — uncommon for global-init, skip.
-        if ((insn >> 26) & 1) return false;
-
-        unsigned rt = insn & 0x1f;
-
-        // STP / STNP (store pair, non-SIMD): bits[29:27] = 101
-        if (((insn >> 27) & 7) == 5) {
-            unsigned rt2 = (insn >> 10) & 0x1f;
-            if ((insn >> 31) & 1) {
-                // 64-bit X pair (bit31=1)
-                *((uint64_t*) rw_dst)      = getReg(rt);
-                *((uint64_t*)(rw_dst + 8)) = getReg(rt2);
-            } else {
-                // 32-bit W pair (bit31=0)
-                *((uint32_t*) rw_dst)      = (uint32_t)getReg(rt);
-                *((uint32_t*)(rw_dst + 4)) = (uint32_t)getReg(rt2);
-            }
-        } else {
-            // STR / STUR / STLR and variants
-            uint64_t val = getReg(rt);
-            switch ((insn >> 30) & 3) {
-                case 3: *((uint64_t*)rw_dst) = val;           break;
-                case 2: *((uint32_t*)rw_dst) = (uint32_t)val; break;
-                case 1: *((uint16_t*)rw_dst) = (uint16_t)val; break;
-                case 0: *((uint8_t*) rw_dst) = (uint8_t)val;  break;
-            }
-        }
-
-        ctx->pc.x += 4;
-        return true;
-    }
-    return false;
-}
-
 // ─── Shared crash recovery ────────────────────────────────────────────────────
 jmp_buf           g_recover_jmp;
 volatile bool     g_in_recover  = false;
@@ -87,37 +22,8 @@ volatile int      g_recover_sig = 0;
 volatile uint32_t g_recover_esr = 0;
 volatile uint64_t g_recover_pc  = 0;
 
-static bool inJitRegion(uint64_t addr) {
-    for (int i = 0; i < g_jit_emu_count; i++) {
-        if (addr >= g_jit_emu_regions[i].rx_alloc &&
-            addr <  g_jit_emu_regions[i].rx_alloc + g_jit_emu_regions[i].size)
-            return true;
-    }
-    return false;
-}
-
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     uint32_t esr = ctx->esr;
-
-    // Write-permission fault (EC=0x24, WnR=1) to a JIT rx region?
-    // Emulate the store via rw_addr and resume — no longjmp needed.
-    if (((esr >> 26) & 0x3f) == 0x24 && ((esr >> 6) & 1) && g_jit_emu_count > 0) {
-        if (emulateStore(ctx)) {
-            svcReturnFromException(0);
-            return;
-        }
-    }
-
-    // BadSVC fault with PC inside a JIT rx region?
-    // Game code contains Android/Linux SVC instructions that can't run on Switch.
-    // Fake success (x0=0) and advance PC so execution continues.
-    if (ctx->error_desc == ThreadExceptionDesc_BadSVC &&
-        g_jit_emu_count > 0 && inJitRegion(ctx->pc.x)) {
-        ctx->cpu_gprs[0].x = 0;  // fake x0=0 (success/no-error)
-        ctx->pc.x += 4;
-        svcReturnFromException(0);
-        return;
-    }
 
     if (g_in_recover) {
         g_recover_sig = (int)ctx->error_desc;
@@ -629,19 +535,6 @@ LoadedSo* elfLoad(const char* path) {
             compatLogFmt("JIT: jitTransitionToExecutable failed: 0x%08X", exec_rc);
         } else {
             compatLog("JIT: code memory is now executable");
-            // Register this region for write-fault emulation.
-            // The exception handler will silently redirect writes from rx_addr
-            // to rw_addr so ctors/JNI_OnLoad can initialize globals.
-            if (g_jit_emu_count < 4) {
-                g_jit_emu_regions[g_jit_emu_count++] = {
-                    (uint64_t)exec_alloc,
-                    (uint64_t)write_alloc,
-                    alloc_size
-                };
-                compatLogFmt("JIT: emu[%d] rx=%p rw=%p size=0x%zx",
-                             g_jit_emu_count - 1,
-                             (void*)exec_alloc, (void*)write_alloc, alloc_size);
-            }
         }
     } else {
         this_svc_perm_code = 0xD801;  // heap fallback — not executable

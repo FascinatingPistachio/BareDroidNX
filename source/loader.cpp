@@ -476,14 +476,93 @@ LaunchResult launchApk(const std::string& apk_path, const std::string& pkg_name,
         on_create = (OnCreate_fn)so->findSym(
             "Java_com_google_androidgamesdk_GameActivity_initializeNativeCode");
         if (!on_create) {
-            // This is a pure-JNI game (no NativeActivity entry point).
-            // The Java_ methods logged above are the actual entry points.
-            compatLog("No NativeActivity entry point — pure-JNI game (see JAVA_METHOD lines above)");
-            compatUiLog("Pure-JNI game — see JAVA_METHOD in log");
-            if (cb) cb("Pure-JNI game", "Check compat_log.txt for JAVA_METHOD entry points");
-            result.errorStage  = "Finding entry point";
-            result.errorDetail = "Pure-JNI game — ANativeActivity_onCreate not exported. "
-                                 "See JAVA_METHOD lines in compat_log.txt for entry points.";
+            compatLog("No NativeActivity — attempting Cocos2d-x direct Java_ call");
+            compatUiLog("Cocos2d-x: direct Java_ mode");
+            if (cb) cb("Cocos2d-x mode", "Calling Java_ methods directly...");
+
+            JNIEnv* env = (JNIEnv*)g_compat.env_outer;
+            jobject obj = (jobject)(uintptr_t)0x4001;
+
+            typedef void (*SetPaths_fn)(JNIEnv*, jobject, jstring, jstring);
+            SetPaths_fn setPaths = (SetPaths_fn)so->findSym(
+                "Java_org_cocos2dx_lib_Cocos2dxActivity_nativeSetPaths");
+            if (setPaths) {
+                compatLogFmt("Cocos2d-x: nativeSetPaths @%p apk=%s data=%s",
+                             (void*)setPaths, apk_path.c_str(), base_dir.c_str());
+                g_in_recover = true; g_recover_sig = 0;
+                if (setjmp(g_recover_jmp) == 0) {
+                    setPaths(env, obj,
+                             (jstring)apk_path.c_str(), (jstring)base_dir.c_str());
+                    g_in_recover = false;
+                    compatLog("Cocos2d-x: nativeSetPaths OK");
+                    compatUiLog("nativeSetPaths: OK");
+                } else {
+                    g_in_recover = false;
+                    compatLogFmt("Cocos2d-x: nativeSetPaths FAULT sig=%d", g_recover_sig);
+                    compatUiLog("nativeSetPaths: FAULT");
+                }
+            } else {
+                compatLog("Cocos2d-x: nativeSetPaths not found");
+            }
+
+            typedef void (*NativeInit_fn)(JNIEnv*, jobject, jint, jint);
+            NativeInit_fn nativeInit = (NativeInit_fn)so->findSym(
+                "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeInit");
+            if (!nativeInit)
+                nativeInit = (NativeInit_fn)so->findSym(
+                    "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeResize");
+            if (nativeInit) {
+                compatLogFmt("Cocos2d-x: nativeInit @%p 1280x720", (void*)nativeInit);
+                g_in_recover = true; g_recover_sig = 0;
+                if (setjmp(g_recover_jmp) == 0) {
+                    nativeInit(env, obj, 1280, 720);
+                    g_in_recover = false;
+                    compatLog("Cocos2d-x: nativeInit OK");
+                    compatUiLog("nativeInit: OK");
+                } else {
+                    g_in_recover = false;
+                    compatLogFmt("Cocos2d-x: nativeInit FAULT sig=%d", g_recover_sig);
+                    compatUiLog("nativeInit: FAULT");
+                }
+            } else {
+                compatLog("Cocos2d-x: nativeInit/nativeResize not found");
+            }
+
+            typedef void (*NativeRender_fn)(JNIEnv*, jobject);
+            NativeRender_fn nativeRender = (NativeRender_fn)so->findSym(
+                "Java_org_cocos2dx_lib_Cocos2dxRenderer_nativeRender");
+            if (nativeRender) {
+                compatLogFmt("Cocos2d-x: nativeRender @%p — game loop start", (void*)nativeRender);
+                compatUiLog("nativeRender: starting game loop");
+                if (cb) cb("Running game", "Cocos2d-x nativeRender loop...");
+                int frame = 0;
+                while (appletMainLoop()) {
+                    g_in_recover = true; g_recover_sig = 0;
+                    if (setjmp(g_recover_jmp) == 0) {
+                        nativeRender(env, obj);
+                        g_in_recover = false;
+                    } else {
+                        g_in_recover = false;
+                        compatLogFmt("Cocos2d-x: nativeRender FAULT sig=%d frame=%d — stop",
+                                     g_recover_sig, frame);
+                        break;
+                    }
+                    if (g_egl_surface != EGL_NO_SURFACE)
+                        eglSwapBuffers(g_egl_display, g_egl_surface);
+                    ++frame;
+                    if (frame % 60 == 0) {
+                        char ub[48];
+                        snprintf(ub, sizeof(ub), "frame %d", frame);
+                        compatUiLog(ub);
+                    }
+                }
+                compatLogFmt("Cocos2d-x: loop done frames=%d", frame);
+            } else {
+                compatLog("Cocos2d-x: nativeRender not found");
+                compatUiLog("nativeRender: not found");
+            }
+
+            result.ok = true;
             if (g_compat_log) { fclose(g_compat_log); g_compat_log = nullptr; }
             return result;
         }
